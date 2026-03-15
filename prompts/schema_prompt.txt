@@ -1,0 +1,5 @@
+Convert the user's natural language request into a flat JSON schema.
+Each key should be a field to extract, and each value should be the string "string".
+Use snake_case for keys.
+Example request: "Extract product name and price"
+Example response: {"product_name": "string", "price": "string"}

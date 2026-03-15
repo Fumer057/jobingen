@@ -1,0 +1,11 @@
+__pycache__/
+.env
+.venv
+env/
+venv/
+*.pyc
+output.csv
+output.json
+extracted_data.csv
+extracted_data.json
+.streamlit/

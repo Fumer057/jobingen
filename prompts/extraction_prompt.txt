@@ -1,0 +1,4 @@
+Respond only with a JSON object containing the requested data.
+Ensure all keys from the schema are present. 
+If a value is missing, use null.
+Do not include any explanation or markdown formatting in your response.
