@@ -16,16 +16,29 @@ from utils.exporter import export_csv, export_json
 # ── Load env vars ────────────────────────────────────────────────────────────
 load_dotenv()
 
-# ── Validate API key immediately ─────────────────────────────────────────────
-if not os.getenv("OPENAI_API_KEY"):
-    st.error("❌ OPENAI_API_KEY is not set. Add it to your .env file and restart.")
-    st.stop()
-
 # ── Fix asyncio conflict with Streamlit (Python 3.10+ safe) ─────────────────
 nest_asyncio.apply()
 
 # ── UI ───────────────────────────────────────────────────────────────────────
 st.title("🕷️ Universal AI Web Scraper")
+
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    provider = st.selectbox("LLM Provider", ["Gemini", "OpenAI"])
+    
+    if provider == "Gemini":
+        api_key = st.text_input("Gemini API Key", type="password", value=os.getenv("GEMINI_API_KEY", ""))
+        model_name = "gemini-2.0-flash"
+    else:
+        api_key = st.text_input("OpenAI API Key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
+        model_name = "gpt-4o-mini"
+
+    st.divider()
+    st.info(f"Using {model_name}")
+
+if not api_key or api_key.startswith("your_"):
+    st.warning(f"⚠️ Please enter a valid {provider} API Key in the sidebar.")
+    st.stop()
 
 url = st.text_input("Enter URL", placeholder="https://books.toscrape.com")
 
@@ -43,8 +56,8 @@ if st.button("Scrape") and url:
     for key in ("schema", "schema_confirmed"):
         st.session_state.pop(key, None)
 
-    schema_agent    = SchemaAgent()
-    extraction_agent = ExtractionAgent()
+    schema_agent    = SchemaAgent(provider=provider.lower(), api_key=api_key)
+    extraction_agent = ExtractionAgent(provider=provider.lower(), api_key=api_key)
     pagination_agent = PaginationAgent()
 
     # Step 1 — generate schema
