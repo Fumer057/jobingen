@@ -27,17 +27,27 @@ with st.sidebar:
     provider = st.selectbox("LLM Provider", ["Gemini", "OpenAI"])
     
     if provider == "Gemini":
-        api_key = st.text_input("Gemini API Key", type="password", value=os.getenv("GEMINI_API_KEY", ""))
+        ui_key = st.text_input("Gemini API Key", type="password", help="Enter your key here to override the .env value.")
+        env_key = os.getenv("GEMINI_API_KEY", "")
         model_name = "gemini-2.0-flash"
     else:
-        api_key = st.text_input("OpenAI API Key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
+        ui_key = st.text_input("OpenAI API Key", type="password", help="Enter your key here to override the .env value.")
+        env_key = os.getenv("OPENAI_API_KEY", "")
         model_name = "gpt-4o-mini"
 
+    # Resolve active key: UI takes priority over .env
+    api_key = ui_key if ui_key else env_key
+
     st.divider()
+    if api_key and not api_key.startswith("your_"):
+        st.info(f"✅ Key for {provider} is active (loaded from {'UI' if ui_key else '.env'})")
+    else:
+        st.warning(f"⚠️ No active key for {provider}")
+
     st.info(f"Using {model_name}")
 
 if not api_key or api_key.startswith("your_"):
-    st.warning(f"⚠️ Please enter a valid {provider} API Key in the sidebar.")
+    st.warning(f"⚠️ Please enter a valid {provider} API Key in the sidebar or update your .env file.")
     st.stop()
 
 url = st.text_input("Enter URL", placeholder="https://books.toscrape.com")
