@@ -1,8 +1,12 @@
-playwright
-beautifulsoup4
-pydantic
 streamlit
+playwright
+pydantic
+instructor
 pandas
-google-generativeai
-python-dotenv
 openai
+python-dotenv
+langchain-text-splitters
+nest_asyncio
+beautifulsoup4
+tenacity
+google-generativeai

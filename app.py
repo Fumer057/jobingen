@@ -1,139 +1,158 @@
 import streamlit as st
 import asyncio
-import os
 import time
+import os
+import nest_asyncio
 from dotenv import load_dotenv
-from crawler.crawler_engine import crawl_page
-from agents.schema_agent import generate_schema
+
+from crawler.crawler_engine import WebCrawler
+from agents.schema_agent import SchemaAgent
+from agents.extraction_agent import ExtractionAgent
+from agents.pagination_agent import PaginationAgent
 from models.dynamic_schema import create_dynamic_model
-from agents.extraction_agent import extract_data
-from utils.exporter import export_to_csv, export_to_json
-from utils.pagination import find_next_page
-import pandas as pd
-import sys
+from utils.chunker import split_text
+from utils.exporter import export_csv, export_json
 
-# Windows-specific fix for Playwright and asyncio
-if sys.platform == 'win32':
-    import asyncio
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-
+# ── Load env vars ────────────────────────────────────────────────────────────
 load_dotenv()
 
-st.set_page_config(page_title="Universal AI Web Scraper", page_icon="🕷️", layout="wide")
+# ── Validate API key immediately ─────────────────────────────────────────────
+if not os.getenv("OPENAI_API_KEY"):
+    st.error("❌ OPENAI_API_KEY is not set. Add it to your .env file and restart.")
+    st.stop()
 
-st.markdown("""
-    <style>
-    .main { background-color: #0e1117; color: #ffffff; }
-    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #ff4b4b; color: white; transition: 0.3s; }
-    .stButton>button:hover { background-color: #ff3333; transform: scale(1.02); }
-    </style>
-    """, unsafe_allow_html=True)
+# ── Fix asyncio conflict with Streamlit (Python 3.10+ safe) ─────────────────
+nest_asyncio.apply()
 
+# ── UI ───────────────────────────────────────────────────────────────────────
 st.title("🕷️ Universal AI Web Scraper")
-st.markdown("### Powered by Gemini 2.0 & GPT-4o-mini")
 
-with st.sidebar:
-    st.header("⚙️ Configuration")
-    provider = st.selectbox("LLM Provider", ["Gemini", "OpenAI"])
-    
-    if provider == "Gemini":
-        api_key = st.text_input("Gemini API Key", type="password", value=os.getenv("GEMINI_API_KEY", ""))
-    else:
-        api_key = st.text_input("OpenAI API Key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
-        
-    st.divider()
-    st.header("💸 Save Credits")
-    use_manual_schema = st.checkbox("Manual Schema (Skip AI Schema Gen)", value=False)
-    manual_schema_input = "{}"
-    if use_manual_schema:
-        manual_schema_input = st.text_area("Enter JSON Schema", value='{"title": "string", "price": "string"}', height=100)
-    
-    enable_pagination = st.checkbox("Enable Pagination (Extra LLM Call)", value=False)
-    st.info("💡 Pro Tip: Disable pagination and use manual schema to minimize API costs by 2x.")
+url = st.text_input("Enter URL", placeholder="https://books.toscrape.com")
 
-col1, col2 = st.columns([1, 1])
+user_prompt = st.text_area(
+    "Describe what data you want",
+    "Extract product name, price and rating"
+)
 
-with col1:
-    url = st.text_input("Target URL", placeholder="https://example.com")
-    prompt_input = st.text_area("Extraction Instructions", 
-                         placeholder="e.g., Extract job title, company name, location and salary",
-                         value="Extract job title, company name, location and salary")
-    max_pages = st.number_input("Max Pages", min_value=1, max_value=5, value=1, disabled=not enable_pagination)
+max_pages = st.slider("Max pages to scrape", min_value=1, max_value=10, value=2)
 
-if st.button("🚀 Start AI Extraction"):
-    if not url or (not prompt_input and not use_manual_schema) or not api_key:
-        st.error("Missing required inputs.")
-    else:
-        async def run_scraper():
-            all_extracted_data = []
-            current_url = url
-            
-            with st.status("Extracting Data...", expanded=True) as status:
+# ── Main pipeline ────────────────────────────────────────────────────────────
+if st.button("Scrape") and url:
+
+    # Reset state on every fresh Scrape click
+    for key in ("schema", "schema_confirmed"):
+        st.session_state.pop(key, None)
+
+    schema_agent    = SchemaAgent()
+    extraction_agent = ExtractionAgent()
+    pagination_agent = PaginationAgent()
+
+    # Step 1 — generate schema
+    with st.spinner("Generating schema from your prompt..."):
+        schema = schema_agent.generate_schema(user_prompt)
+        st.session_state["schema"] = schema
+
+    st.write("### 🗂️ Generated Schema")
+    st.json(schema)
+
+    DynamicModel = create_dynamic_model("ExtractionResult", schema)
+
+    # Step 2 — crawl + extract
+    crawler = WebCrawler()
+
+    async def run():
+        await crawler.start()
+
+        data = []
+        current_url = url
+        pages_scraped = 0
+
+        while current_url and pages_scraped < max_pages:
+
+            st.write(f"📄 Scraping page {pages_scraped + 1}: `{current_url}`")
+
+            try:
+                result = await crawler.fetch_page(current_url)
+            except Exception as e:
+                st.error(f"Failed to load page: {e}")
+                break
+
+            text = result["text"]
+            html = result["html"]
+            chunks = split_text(text)
+
+            st.write(f"   ↳ {len(chunks)} chunks to process")
+
+            rate_display = st.empty()
+
+            for i, chunk in enumerate(chunks):
+                # Show live rate limit usage before each chunk call
+                status = extraction_agent.rate_limit_status()
+                rate_display.info(
+                    f"📊 Rate limit — "
+                    f"RPM: {status['requests_in_window']}/{status['rpm_limit']} "
+                    f"({status['rpm_pct']}%)  |  "
+                    f"TPM: {status['tokens_in_window']:,}/{status['tpm_limit']:,} "
+                    f"({status['tpm_pct']}%)"
+                )
+
                 try:
-                    # 1. Get Schema
-                    if use_manual_schema:
-                        import json
-                        schema = json.loads(manual_schema_input)
-                        status.update(label="✅ Using Manual Schema (Skipped AI step)")
-                    else:
-                        status.update(label="🤖 GPT/Gemini: Designing Data Schema...")
-                        schema = generate_schema(prompt_input, api_key, provider.lower())
-                    
-                    st.write("**Data Schema:**", schema)
-                    
-                    # 2. Create Model
-                    DynamicModel = create_dynamic_model("ExtractionResult", schema)
-                    
-                    for p in range(int(max_pages)):
-                        status.update(label=f"🌐 Crawling Page {p+1}...")
-                        markdown = await crawl_page(current_url)
-                        
-                        status.update(label=f"🧠 LLM: Extracting data...")
-                        page_results = extract_data(markdown, DynamicModel, api_key, prompt_input, provider.lower())
-                        
-                        if page_results:
-                            all_extracted_data.extend(page_results)
-                            st.write(f"✅ Found {len(page_results)} items on Page {p+1}")
-                        
-                        if enable_pagination and p < max_pages - 1:
-                            status.update(label="🔗 Searching for next page link...")
-                            next_url = find_next_page(markdown, current_url, api_key, provider.lower())
-                            if next_url and next_url != current_url:
-                                current_url = next_url
-                                time.sleep(1)
-                            else:
-                                break
-                        elif not enable_pagination:
-                            break
-                    
-                    status.update(label="✨ Process Complete!", state="complete")
-                    
+                    extracted = extraction_agent.extract(chunk, schema)
+                    data.extend(extracted)
+                    st.write(f"   ✅ Chunk {i + 1}/{len(chunks)}: {len(extracted)} items")
+                except RuntimeError as e:
+                    # Raised after all retries exhausted
+                    st.error(f"   ❌ Chunk {i + 1} gave up after retries: {e}")
                 except Exception as e:
-                    if "429" in str(e) or "quota" in str(e).lower():
-                        st.error("📉 Rate Limit Hit! Your API quota has been exhausted. Please wait a few minutes or switch to another provider (e.g., OpenAI).")
-                    else:
-                        st.error(f"❌ An error occurred: {e}")
-                    status.update(label="Failed", state="error")
-            
-            if all_extracted_data:
-                st.success(f"Successfully extracted {len(all_extracted_data)} total items!")
-                df = pd.DataFrame(all_extracted_data)
-                st.dataframe(df, use_container_width=True)
-                
-                c1, c2 = st.columns(2)
-                with c1:
-                    csv_path = export_to_csv(all_extracted_data)
-                    with open(csv_path, "rb") as f:
-                        st.download_button("📥 Download CSV", f, "extracted_data.csv", "text/csv")
-                with c2:
-                    json_path = export_to_json(all_extracted_data)
-                    with open(json_path, "rb") as f:
-                        st.download_button("📥 Download JSON", f, "extracted_data.json", "application/json")
+                    st.warning(f"   ⚠️ Chunk {i + 1} failed: {e}")
 
-        # Robust loop management for Windows + Streamlit + Playwright
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+            # Use HTML-based pagination (reliable) instead of LLM
+            next_page = pagination_agent.find_next_page(html, current_url)
+
+            if not next_page:
+                st.write("   ↳ No next page found — stopping.")
+                break
+
+            current_url = next_page
+            pages_scraped += 1
+            time.sleep(1)  # polite delay
+
+        await crawler.close()
+        return data
+
+    with st.spinner("Scraping in progress..."):
+        # Python 3.10+ safe event loop handling
         try:
-            loop.run_until_complete(run_scraper())
-        finally:
-            loop.close()
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        scraped_data = loop.run_until_complete(run())
+
+    # Step 3 — deduplicate
+    seen = set()
+    unique_data = []
+    for item in scraped_data:
+        key = str(sorted(item.items()))
+        if key not in seen:
+            seen.add(key)
+            unique_data.append(item)
+
+    st.success(
+        f"✅ Extracted **{len(unique_data)}** unique items "
+        f"({len(scraped_data) - len(unique_data)} duplicates removed)"
+    )
+
+    # Step 4 — preview + export
+    if unique_data:
+        import pandas as pd
+        st.write("### 📊 Preview")
+        st.dataframe(pd.DataFrame(unique_data))
+
+    st.write("### 📦 Raw JSON")
+    st.json(unique_data)
+
+    json_file = export_json(unique_data)
+    csv_file  = export_csv(unique_data)
+    st.success(f"💾 Exported → `{json_file}` and `{csv_file}`")
