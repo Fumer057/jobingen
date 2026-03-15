@@ -4,6 +4,7 @@ import logging
 import os
 import google.generativeai as genai
 from openai import OpenAI, RateLimitError, APITimeoutError, APIConnectionError
+import anthropic
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -19,7 +20,7 @@ from utils.rate_limiter import RateLimiter, estimate_tokens
 logger = logging.getLogger(__name__)
 
 # ── Retry policy ──────────────────────────────────────────────────────────────
-_RETRY_EXCEPTIONS = (RateLimitError, APITimeoutError, APIConnectionError, Exception) # Broaden for Gemini errors too
+_RETRY_EXCEPTIONS = (RateLimitError, APITimeoutError, APIConnectionError, Exception)
 
 _retry_policy = retry(
     retry=retry_if_exception_type(_RETRY_EXCEPTIONS),
@@ -34,14 +35,21 @@ class ExtractionAgent:
 
     def __init__(self, provider: str = "openai", api_key: str = None):
         self.provider = provider.lower()
-        self.api_key = api_key or (os.getenv("GEMINI_API_KEY") if provider == "gemini" else os.getenv("OPENAI_API_KEY"))
+        self.api_key = api_key or (
+            os.getenv("GEMINI_API_KEY") if self.provider == "gemini" else 
+            os.getenv("ANTHROPIC_API_KEY") if self.provider == "anthropic" else 
+            os.getenv("OPENAI_API_KEY")
+        )
         
         if self.provider == "gemini":
             genai.configure(api_key=self.api_key)
             self.model = genai.GenerativeModel("gemini-2.0-flash")
-            # Gemini limits are complex, using a conservative default for free tier
             self.RPM_LIMIT = 15 
-            self.TPM_LIMIT = 1_000_000 # Just a placeholder
+            self.TPM_LIMIT = 1_000_000
+        elif self.provider == "anthropic":
+            self.client = anthropic.Anthropic(api_key=self.api_key)
+            self.RPM_LIMIT = 50 
+            self.TPM_LIMIT = 40_000
         else:
             self.client = OpenAI(api_key=self.api_key, timeout=30)
             self.RPM_LIMIT = 500
@@ -67,17 +75,21 @@ class ExtractionAgent:
                 f"Extraction failed after 3 retries. Last error: {e.last_attempt.exception()}"
             )
 
-        # Step 3 — record usage (Gemini doesn't easily expose this in the same way, so we estimate)
+        # Step 3 — record usage
         if self.provider == "openai" and hasattr(response, "usage") and response.usage:
             self.limiter.record(response.usage.total_tokens)
+        elif self.provider == "anthropic" and hasattr(response, "usage"):
+            self.limiter.record(response.usage.input_tokens + response.usage.output_tokens)
         else:
-            # For Gemini, just record the estimate
             self.limiter.record(estimated_tokens)
 
         # Step 4 — parse and return
         if self.provider == "gemini":
             raw = response.text
-            finish_reason = "stop" # Placeholder
+            finish_reason = "stop"
+        elif self.provider == "anthropic":
+            raw = response.content[0].text
+            finish_reason = "stop" if response.stop_reason == "end_turn" else "length"
         else:
             raw = response.choices[0].message.content
             finish_reason = response.choices[0].finish_reason
@@ -93,7 +105,6 @@ class ExtractionAgent:
             )
 
         if isinstance(result, dict):
-            # If wrapped in a key (common in Gemini)
             for val in result.values():
                 if isinstance(val, list):
                     return val
@@ -110,6 +121,14 @@ class ExtractionAgent:
     def _call_api_with_retry(self, prompt: str):
         if self.provider == "gemini":
             return self.model.generate_content(prompt)
+        elif self.provider == "anthropic":
+            return self.client.messages.create(
+                model="claude-3-5-sonnet-20240620",
+                max_tokens=2000,
+                temperature=0,
+                system="Return ONLY valid JSON. No explanation.",
+                messages=[{"role": "user", "content": prompt}]
+            )
         else:
             return self.client.chat.completions.create(
                 model="gpt-4o-mini",

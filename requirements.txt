@@ -10,3 +10,4 @@ nest_asyncio
 beautifulsoup4
 tenacity
 google-generativeai
+anthropic

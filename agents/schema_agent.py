@@ -2,6 +2,7 @@ import os
 import json
 import google.generativeai as genai
 from openai import OpenAI
+import anthropic
 from typing import Dict
 from dotenv import load_dotenv
 
@@ -10,11 +11,17 @@ load_dotenv()
 class SchemaAgent:
     def __init__(self, provider: str = "openai", api_key: str = None):
         self.provider = provider.lower()
-        self.api_key = api_key or (os.getenv("GEMINI_API_KEY") if provider == "gemini" else os.getenv("OPENAI_API_KEY"))
+        self.api_key = api_key or (
+            os.getenv("GEMINI_API_KEY") if self.provider == "gemini" else 
+            os.getenv("ANTHROPIC_API_KEY") if self.provider == "anthropic" else 
+            os.getenv("OPENAI_API_KEY")
+        )
         
         if self.provider == "gemini":
             genai.configure(api_key=self.api_key)
             self.model = genai.GenerativeModel("gemini-2.0-flash")
+        elif self.provider == "anthropic":
+            self.client = anthropic.Anthropic(api_key=self.api_key)
         else:
             self.client = OpenAI(api_key=self.api_key)
 
@@ -34,6 +41,15 @@ class SchemaAgent:
         if self.provider == "gemini":
             response = self.model.generate_content(system_prompt.format(prompt=prompt))
             text = response.text.strip()
+        elif self.provider == "anthropic":
+            response = self.client.messages.create(
+                model="claude-3-5-sonnet-20240620",
+                max_tokens=1000,
+                temperature=0,
+                system="Return ONLY valid JSON.",
+                messages=[{"role": "user", "content": system_prompt.format(prompt=prompt)}]
+            )
+            text = response.content[0].text.strip()
         else:
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",

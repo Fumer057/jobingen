@@ -24,12 +24,16 @@ st.title("🕷️ Universal AI Web Scraper")
 
 with st.sidebar:
     st.header("⚙️ Configuration")
-    provider = st.selectbox("LLM Provider", ["Gemini", "OpenAI"])
+    provider = st.selectbox("LLM Provider", ["Gemini", "OpenAI", "Anthropic"])
     
     if provider == "Gemini":
         ui_key = st.text_input("Gemini API Key", type="password", help="Enter your key here to override the .env value.")
         env_key = os.getenv("GEMINI_API_KEY", "")
         model_name = "gemini-2.0-flash"
+    elif provider == "Anthropic":
+        ui_key = st.text_input("Anthropic API Key", type="password", help="Enter your key here to override the .env value.")
+        env_key = os.getenv("ANTHROPIC_API_KEY", "")
+        model_name = "claude-3-5-sonnet"
     else:
         ui_key = st.text_input("OpenAI API Key", type="password", help="Enter your key here to override the .env value.")
         env_key = os.getenv("OPENAI_API_KEY", "")
